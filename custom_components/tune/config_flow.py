@@ -20,6 +20,46 @@ class TuneConfigFlow(ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
+    async def async_step_zeroconf(
+        self, discovery_info: dict[str, Any]
+    ) -> ConfigFlowResult:
+        """Handle zeroconf discovery of a Tune server."""
+        host = discovery_info.get("host", discovery_info.get("ip", ""))
+        port = discovery_info.get("port", DEFAULT_PORT)
+        properties = discovery_info.get("properties", {})
+        version = properties.get("version", "")
+
+        await self.async_set_unique_id(f"tune_{host}_{port}")
+        self._abort_if_unique_id_configured()
+
+        self.context["title_placeholders"] = {"name": f"Tune {version} ({host})"}
+        self._discovered_host = host
+        self._discovered_port = port
+
+        return await self.async_step_zeroconf_confirm()
+
+    async def async_step_zeroconf_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Confirm zeroconf discovery."""
+        host = getattr(self, "_discovered_host", DEFAULT_HOST)
+        port = getattr(self, "_discovered_port", DEFAULT_PORT)
+
+        if user_input is not None:
+            try:
+                info = await self._validate_connection(host, port)
+                return self.async_create_entry(
+                    title=info.get("name", f"Tune ({host})"),
+                    data={CONF_HOST: host, CONF_PORT: port},
+                )
+            except Exception:
+                return self.async_abort(reason="cannot_connect")
+
+        return self.async_show_form(
+            step_id="zeroconf_confirm",
+            description_placeholders={"host": host, "port": str(port)},
+        )
+
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
