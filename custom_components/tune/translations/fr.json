@@ -1,0 +1,17 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connexion au serveur Tune",
+        "data": {
+          "host": "Adresse",
+          "port": "Port"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Impossible de se connecter au serveur Tune",
+      "unknown": "Erreur inattendue"
+    }
+  }
+}
