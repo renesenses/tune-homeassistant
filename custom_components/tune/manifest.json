@@ -1,12 +1,14 @@
 {
   "domain": "tune",
   "name": "Tune Music Server",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "documentation": "https://github.com/renesenses/tune-homeassistant",
   "issue_tracker": "https://github.com/renesenses/tune-homeassistant/issues",
   "dependencies": [],
-  "requirements": ["aiohttp>=3.8"],
-  "codeowners": ["@renesenses"],
+  "requirements": [],
+  "codeowners": [
+    "@renesenses"
+  ],
   "iot_class": "local_push",
   "integration_type": "device",
   "zeroconf": [

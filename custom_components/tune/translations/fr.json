@@ -1,17 +1,39 @@
 {
   "config": {
+    "flow_title": "{name}",
     "step": {
       "user": {
         "title": "Connexion au serveur Tune",
         "data": {
           "host": "Adresse",
-          "port": "Port"
+          "port": "Port",
+          "api_key": "Clé d'API (seulement si l'authentification est activée)"
+        }
+      },
+      "zeroconf_confirm": {
+        "title": "Serveur Tune trouvé",
+        "description": "Ajouter le serveur Tune {host}:{port} ?",
+        "data": {
+          "api_key": "Clé d'API (seulement si l'authentification est activée)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Clé d'API du serveur Tune",
+        "description": "L'authentification est activée sur ce serveur Tune. Saisissez une clé d'API.",
+        "data": {
+          "api_key": "Clé d'API"
         }
       }
     },
     "error": {
       "cannot_connect": "Impossible de se connecter au serveur Tune",
+      "invalid_auth": "Le serveur Tune refuse la clé d'API",
       "unknown": "Erreur inattendue"
+    },
+    "abort": {
+      "already_configured": "Ce serveur Tune est déjà configuré",
+      "cannot_connect": "Impossible de se connecter au serveur Tune",
+      "reauth_successful": "Clé d'API mise à jour"
     }
   }
 }

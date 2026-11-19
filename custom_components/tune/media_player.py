@@ -10,6 +10,7 @@ from homeassistant.components.media_player import (
     MediaPlayerEntityFeature,
     MediaPlayerState,
     MediaType,
+    RepeatMode,
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PORT
@@ -98,36 +99,62 @@ class TuneMediaPlayer(CoordinatorEntity[TuneCoordinator], MediaPlayerEntity):
         return MediaPlayerState.IDLE
 
     @property
+    def _track(self) -> dict | None:
+        """The track the zone is playing (`current_track` in `GET /zones`)."""
+        return self._zone.get("current_track") or self._zone.get("now_playing")
+
+    @property
+    def media_content_type(self) -> MediaType:
+        return MediaType.MUSIC
+
+    @property
     def media_title(self) -> str | None:
-        np = self._zone.get("now_playing") or self._zone.get("current_track")
+        np = self._track
         return np.get("title") if np else None
 
     @property
     def media_artist(self) -> str | None:
-        np = self._zone.get("now_playing") or self._zone.get("current_track")
+        np = self._track
         return np.get("artist_name") if np else None
 
     @property
     def media_album_name(self) -> str | None:
-        np = self._zone.get("now_playing") or self._zone.get("current_track")
+        np = self._track
         return np.get("album_title") if np else None
 
     @property
     def media_image_url(self) -> str | None:
-        np = self._zone.get("now_playing") or self._zone.get("current_track")
-        if np and np.get("cover_path"):
-            return f"http://{self._host}:{self._port}/api/v1/library/artwork/{np['cover_path']}"
-        return None
+        np = self._track
+        cover = np.get("cover_path") if np else None
+        if not cover:
+            return None
+        if cover.startswith(("http://", "https://")):
+            return cover
+        return f"{self.coordinator.base_url}/library/artwork/{cover}"
+
+    async def async_get_media_image(self) -> tuple[bytes | None, str | None]:
+        """Fetch the artwork with the Tune credentials (API key if set)."""
+        url = self.media_image_url
+        if not url:
+            return None, None
+        if not url.startswith(self.coordinator.base_url):
+            return await super().async_get_media_image()
+        return await self.coordinator.api_get_bytes(url)
 
     @property
     def media_duration(self) -> int | None:
-        ms = self._zone.get("duration_ms", 0)
+        np = self._track
+        ms = (np or {}).get("duration_ms") or self._zone.get("duration_ms")
         return ms // 1000 if ms else None
 
     @property
     def media_position(self) -> int | None:
-        ms = self._zone.get("position_ms", 0)
-        return ms // 1000 if ms else None
+        ms = self._zone.get("position_ms")
+        return ms // 1000 if ms is not None else None
+
+    @property
+    def media_position_updated_at(self):
+        return self.coordinator.data.get("updated_at")
 
     @property
     def volume_level(self) -> float | None:
@@ -137,72 +164,79 @@ class TuneMediaPlayer(CoordinatorEntity[TuneCoordinator], MediaPlayerEntity):
     def is_volume_muted(self) -> bool | None:
         return self._zone.get("muted")
 
-    async def async_media_play(self) -> None:
-        await self.coordinator.api_post(f"/playback/{self._zone_id}/resume")
+    @property
+    def shuffle(self) -> bool | None:
+        return self._zone.get("shuffle")
+
+    @property
+    def repeat(self) -> RepeatMode | None:
+        mode = self._zone.get("repeat")
+        try:
+            return RepeatMode(mode) if mode else None
+        except ValueError:
+            return None
+
+    async def _command(self, action: str, data: dict | None = None, params: dict | None = None) -> None:
+        await self.coordinator.api_post(
+            f"/zones/{self._zone_id}/{action}", data, params=params
+        )
         await self.coordinator.async_request_refresh()
+
+    async def async_media_play(self) -> None:
+        await self._command("resume")
 
     async def async_media_pause(self) -> None:
-        await self.coordinator.api_post(f"/playback/{self._zone_id}/pause")
-        await self.coordinator.async_request_refresh()
+        await self._command("pause")
 
     async def async_media_stop(self) -> None:
-        await self.coordinator.api_post(f"/playback/{self._zone_id}/stop")
-        await self.coordinator.async_request_refresh()
+        await self._command("stop")
 
     async def async_media_next_track(self) -> None:
-        await self.coordinator.api_post(f"/playback/{self._zone_id}/next")
-        await self.coordinator.async_request_refresh()
+        await self._command("next")
 
     async def async_media_previous_track(self) -> None:
-        await self.coordinator.api_post(f"/playback/{self._zone_id}/previous")
-        await self.coordinator.async_request_refresh()
+        await self._command("previous")
 
     async def async_media_seek(self, position: float) -> None:
-        await self.coordinator.api_post(
-            f"/playback/{self._zone_id}/seek",
-            {"position_ms": int(position * 1000)},
-        )
+        await self._command("seek", {"position_ms": int(position * 1000)})
 
     async def async_set_volume_level(self, volume: float) -> None:
-        await self.coordinator.api_post(
-            f"/playback/{self._zone_id}/volume", {"volume": volume}
-        )
-        await self.coordinator.async_request_refresh()
+        # Tune caps a single increase at +10 dB unless `confirm_increase`
+        # is sent (hearing / speaker protection): a large jump may land
+        # below the requested level. We keep that safety on purpose.
+        await self._command("volume", {"volume": volume})
 
     async def async_mute_volume(self, mute: bool) -> None:
-        await self.coordinator.api_patch(
-            f"/zones/{self._zone_id}", {"muted": mute}
-        )
+        await self.coordinator.api_put(f"/zones/{self._zone_id}/muted", {"muted": mute})
         await self.coordinator.async_request_refresh()
 
     async def async_set_shuffle(self, shuffle: bool) -> None:
-        await self.coordinator.api_post(
-            f"/playback/{self._zone_id}/shuffle", {"enabled": shuffle}
-        )
+        # Tune reads `enabled` from the query string, not the body.
+        await self._command("shuffle", params={"enabled": "true" if shuffle else "false"})
 
-    async def async_set_repeat(self, repeat: str) -> None:
-        await self.coordinator.api_post(
-            f"/playback/{self._zone_id}/repeat", {"mode": repeat}
-        )
+    async def async_set_repeat(self, repeat: RepeatMode | str) -> None:
+        # Tune reads `mode` (off / one / all) from the query string.
+        await self._command("repeat", params={"mode": str(getattr(repeat, "value", repeat))})
 
     async def async_play_media(
         self, media_type: MediaType | str, media_id: str, **kwargs: Any
     ) -> None:
         """Play a specific media item."""
-        body: dict[str, Any] = {"source": "local"}
+        if media_type == MediaType.CHANNEL:
+            # Radio station: dedicated route.
+            await self.coordinator.api_post(f"/radios/{int(media_id)}/play/{self._zone_id}")
+            await self.coordinator.async_request_refresh()
+            return
+
+        body: dict[str, Any] = {}
         if media_type == MediaType.ALBUM:
             body["album_id"] = int(media_id)
         elif media_type == MediaType.PLAYLIST:
             body["playlist_id"] = int(media_id)
-        elif media_type == MediaType.TRACK:
-            body["track_id"] = int(media_id)
         else:
             body["track_id"] = int(media_id)
 
-        await self.coordinator.api_post(
-            f"/playback/{self._zone_id}/play", body
-        )
-        await self.coordinator.async_request_refresh()
+        await self._command("play", body)
 
     async def async_browse_media(
         self,

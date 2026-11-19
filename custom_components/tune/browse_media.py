@@ -101,15 +101,27 @@ def _root_menu(coordinator: TuneCoordinator) -> BrowseMedia:
     )
 
 
+def _items(data, key: str) -> list:
+    """List payload: a bare list, `{"items": [...]}` (paginated library
+    routes) or `{key: [...]}`."""
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        return data.get("items") or data.get(key) or []
+    return []
+
+
 def _artwork_url(coordinator: TuneCoordinator, cover: str | None) -> str | None:
     if not cover:
         return None
+    if cover.startswith(("http://", "https://")):
+        return cover
     return f"{coordinator.base_url}/library/artwork/{cover}"
 
 
 async def _browse_albums(coordinator: TuneCoordinator) -> BrowseMedia:
     data = await coordinator.api_get("/library/albums?limit=200")
-    items = data if isinstance(data, list) else data.get("albums", [])
+    items = _items(data, "albums")
     children = [
         BrowseMedia(
             title=a.get("title", "?"),
@@ -118,7 +130,7 @@ async def _browse_albums(coordinator: TuneCoordinator) -> BrowseMedia:
             media_content_id=str(a["id"]),
             can_play=True,
             can_expand=True,
-            thumbnail=_artwork_url(coordinator, a.get("cover_hash")),
+            thumbnail=_artwork_url(coordinator, a.get("cover_path")),
         )
         for a in items
         if a.get("id")
@@ -136,7 +148,7 @@ async def _browse_albums(coordinator: TuneCoordinator) -> BrowseMedia:
 
 async def _browse_artists(coordinator: TuneCoordinator) -> BrowseMedia:
     data = await coordinator.api_get("/library/artists?limit=200")
-    items = data if isinstance(data, list) else data.get("artists", [])
+    items = _items(data, "artists")
     children = [
         BrowseMedia(
             title=a.get("name", "?"),
@@ -165,7 +177,7 @@ async def _browse_artist_albums(
     coordinator: TuneCoordinator, artist_id: str
 ) -> BrowseMedia:
     data = await coordinator.api_get(f"/library/artists/{artist_id}/albums")
-    items = data if isinstance(data, list) else data.get("albums", [])
+    items = _items(data, "albums")
     children = [
         BrowseMedia(
             title=a.get("title", "?"),
@@ -174,7 +186,7 @@ async def _browse_artist_albums(
             media_content_id=str(a["id"]),
             can_play=True,
             can_expand=True,
-            thumbnail=_artwork_url(coordinator, a.get("cover_hash")),
+            thumbnail=_artwork_url(coordinator, a.get("cover_path")),
         )
         for a in items
         if a.get("id")
@@ -196,7 +208,7 @@ async def _browse_album_tracks(
     coordinator: TuneCoordinator, album_id: str
 ) -> BrowseMedia:
     data = await coordinator.api_get(f"/library/albums/{album_id}/tracks")
-    items = data if isinstance(data, list) else data.get("tracks", [])
+    items = _items(data, "tracks")
     children = [
         BrowseMedia(
             title=f"{t.get('track_number', '')}. {t.get('title', '?')}",
@@ -225,7 +237,7 @@ async def _browse_album_tracks(
 
 async def _browse_playlists(coordinator: TuneCoordinator) -> BrowseMedia:
     data = await coordinator.api_get("/playlists")
-    items = data if isinstance(data, list) else data.get("playlists", [])
+    items = _items(data, "playlists")
     children = [
         BrowseMedia(
             title=p.get("name", "?"),
@@ -254,7 +266,7 @@ async def _browse_playlist_tracks(
     coordinator: TuneCoordinator, playlist_id: str
 ) -> BrowseMedia:
     data = await coordinator.api_get(f"/playlists/{playlist_id}/tracks")
-    items = data if isinstance(data, list) else data.get("tracks", [])
+    items = _items(data, "tracks")
     children = [
         BrowseMedia(
             title=t.get("title", "?"),
@@ -281,7 +293,7 @@ async def _browse_playlist_tracks(
 
 async def _browse_genres(coordinator: TuneCoordinator) -> BrowseMedia:
     data = await coordinator.api_get("/library/genres")
-    items = data if isinstance(data, list) else data.get("genres", [])
+    items = _items(data, "genres")
     children = [
         BrowseMedia(
             title=g.get("name", g) if isinstance(g, dict) else str(g),
@@ -310,7 +322,7 @@ async def _browse_genre_albums(
 ) -> BrowseMedia:
     from urllib.parse import quote
     data = await coordinator.api_get(f"/library/genres/{quote(genre_name)}/albums")
-    items = data if isinstance(data, list) else data.get("albums", [])
+    items = _items(data, "albums")
     children = [
         BrowseMedia(
             title=a.get("title", "?"),
@@ -319,7 +331,7 @@ async def _browse_genre_albums(
             media_content_id=str(a["id"]),
             can_play=True,
             can_expand=True,
-            thumbnail=_artwork_url(coordinator, a.get("cover_hash")),
+            thumbnail=_artwork_url(coordinator, a.get("cover_path")),
         )
         for a in items
         if a.get("id")
@@ -337,7 +349,7 @@ async def _browse_genre_albums(
 
 async def _browse_radios(coordinator: TuneCoordinator) -> BrowseMedia:
     data = await coordinator.api_get("/radios")
-    items = data if isinstance(data, list) else data.get("radios", [])
+    items = _items(data, "radios")
     children = [
         BrowseMedia(
             title=r.get("name", "?"),
