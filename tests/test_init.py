@@ -7,7 +7,10 @@ from homeassistant.components.media_player import DOMAIN as MP_DOMAIN
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.data_entry_flow import FlowResultType
-from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
+try:  # HA >= 2025.1
+    from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
+except ImportError:  # HA 2024.11/12
+    from homeassistant.components.zeroconf import ZeroconfServiceInfo
 from ipaddress import ip_address
 import asyncio
 import json
@@ -218,12 +221,9 @@ async def test_browse_library(hass, aioclient_mock, no_websocket):
     albums = await entity.async_browse_media("album", "albums")
     assert [c.title for c in albums.children] == ["Album"]
     thumb = albums.children[0].thumbnail
-    # Through Home Assistant's image proxy, not a direct http://<tune> URL.
+    # Through Home Assistant's image proxy, by album id.
     assert thumb.startswith("/api/media_player_proxy/"), thumb
-    assert "media_image_id=abc123" in thumb
-    aioclient_mock.get(f"{BASE}/library/artwork/abc123", content=b"img", headers={"Content-Type": "image/jpeg"})
-    assert await entity.async_get_browse_image("album", "artwork", "abc123") == (b"img", "image/jpeg")
-    assert await entity.async_get_browse_image("album", "artwork", "../../system/config") == (None, None)
+    assert "media_image_id=1" in thumb
     artists = await entity.async_browse_media("artist", "artists")
     assert [c.title for c in artists.children] == ["Artiste"]
 
@@ -288,3 +288,96 @@ async def test_websocket_401_starts_reauth(hass, aioclient_mock, no_websocket):
     await hass.async_block_till_done()
     flows = hass.config_entries.flow.async_progress()
     assert any(f["context"]["source"] == config_entries.SOURCE_REAUTH for f in flows)
+
+
+HASH = "0123456789abcdef0123456789abcdef"
+
+
+async def _entity(hass, aioclient_mock):
+    await _setup(hass, aioclient_mock)
+    return hass.data["entity_components"][MP_DOMAIN].get_entity(
+        "media_player.tune_server_192_168_1_50_salon"
+    )
+
+
+async def test_browse_image_follows_redirect_with_size(hass, aioclient_mock, no_websocket):
+    entity = await _entity(hass, aioclient_mock)
+    aioclient_mock.get(
+        f"{BASE}/library/albums/1/artwork", status=307,
+        headers={"Location": f"/api/v1/library/artwork/{HASH}"},
+    )
+    aioclient_mock.get(
+        f"{BASE}/library/artwork/{HASH}?size=200", content=b"img",
+        headers={"Content-Type": "image/jpeg"},
+    )
+    assert await entity.async_get_browse_image("album", "1", "1") == (b"img", "image/jpeg")
+    last = aioclient_mock.mock_calls[-1]
+    assert str(last[1]).endswith(f"/library/artwork/{HASH}?size=200")
+
+
+async def test_browse_image_rejects_bad_ids(hass, aioclient_mock, no_websocket):
+    entity = await _entity(hass, aioclient_mock)
+    aioclient_mock.mock_calls.clear()
+    for bad in (".", "..", "../x", "1/2", HASH, "", None):
+        assert await entity.async_get_browse_image("album", "1", bad) == (None, None)
+    assert aioclient_mock.mock_calls == []
+
+
+async def test_artwork_external_redirect_without_api_key(hass, aioclient_mock, no_websocket):
+    await _setup(hass, aioclient_mock, {CONF_HOST: "192.168.1.50", CONF_PORT: 8888, CONF_API_KEY: "s3cret"})
+    entity = hass.data["entity_components"][MP_DOMAIN].get_entity(
+        "media_player.tune_server_192_168_1_50_salon"
+    )
+    aioclient_mock.get(
+        f"{BASE}/library/albums/1/artwork", status=307,
+        headers={"Location": "https://coverartarchive.org/release/x/front"},
+    )
+    aioclient_mock.get("https://coverartarchive.org/release/x/front", content=b"caa")
+    data, _ = await entity.async_get_browse_image("album", "1", "1")
+    assert data == b"caa"
+    ext = [h for _m, u, _d, h in aioclient_mock.mock_calls if "coverartarchive" in str(u)]
+    assert ext and not (ext[0] or {}).get("Authorization")
+
+
+async def test_artwork_size_cap(hass, aioclient_mock, no_websocket):
+    entity = await _entity(hass, aioclient_mock)
+    aioclient_mock.get(
+        f"{BASE}/library/albums/1/artwork", status=307,
+        headers={"Location": f"/api/v1/library/artwork/{HASH}"},
+    )
+    aioclient_mock.get(f"{BASE}/library/artwork/{HASH}?size=200", content=b"x" * (5 * 1024 * 1024 + 1))
+    assert await entity.async_get_browse_image("album", "1", "1") == (None, None)
+
+
+async def test_artwork_url_matches_server_cover_path_forms(hass, aioclient_mock, no_websocket):
+    entry = await _setup(hass, aioclient_mock)
+    c = hass.data[DOMAIN][entry.entry_id]
+    assert c.artwork_url("https://x/y.jpg", 3) == "https://x/y.jpg"
+    assert c.artwork_url(HASH, 3) == f"{BASE}/library/artwork/{HASH}"
+    # Older rows store a file path: only the album route resolves it.
+    assert c.artwork_url("/music/A/B/cover.jpg", 3) == f"{BASE}/library/albums/3/artwork"
+    assert c.artwork_url(None, 3) == f"{BASE}/library/albums/3/artwork"
+    assert c.artwork_url("abc123", None) is None
+
+
+async def test_api_get_all_stops_on_total_and_cap(hass, aioclient_mock, no_websocket):
+    entry = await _setup(hass, aioclient_mock)
+    c = hass.data[DOMAIN][entry.entry_id]
+    aioclient_mock.get(
+        f"{BASE}/things?limit=2&offset=0", json={"items": [{"id": 1}, {"id": 2}], "total": 4}
+    )
+    aioclient_mock.get(
+        f"{BASE}/things?limit=2&offset=2", json={"items": [{"id": 3}, {"id": 4}], "total": 4}
+    )
+    aioclient_mock.mock_calls.clear()
+    items = await c.api_get_all("/things", "things", page=2)
+    assert [i["id"] for i in items] == [1, 2, 3, 4]
+    assert len(aioclient_mock.mock_calls) == 2  # stopped on `total`, no 3rd page
+    aioclient_mock.mock_calls.clear()
+    items = await c.api_get_all("/things", "things", page=2, cap=3)
+    assert [i["id"] for i in items] == [1, 2, 3]
+    # Bare list shorter than a page: one call.
+    aioclient_mock.get(f"{BASE}/bare?limit=2&offset=0", json=[{"id": 9}])
+    aioclient_mock.mock_calls.clear()
+    assert await c.api_get_all("/bare", "bare", page=2) == [{"id": 9}]
+    assert len(aioclient_mock.mock_calls) == 1
