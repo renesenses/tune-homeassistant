@@ -13,7 +13,7 @@ LIBRARY_ROOT = "tune_library"
 
 async def async_browse_media(
     coordinator: TuneCoordinator,
-    thumb: Callable[[str | None], str | None],
+    thumb: Callable[[dict], str | None],
     media_content_type: MediaType | str | None = None,
     media_content_id: str | None = None,
 ) -> BrowseMedia:
@@ -118,7 +118,7 @@ def _items(data, key: str) -> list:
 
 
 async def _browse_albums(
-    coordinator: TuneCoordinator, thumb: Callable[[str | None], str | None]
+    coordinator: TuneCoordinator, thumb: Callable[[dict], str | None]
 ) -> BrowseMedia:
     items = await coordinator.api_get_all("/library/albums", "albums")
     children = [
@@ -129,7 +129,7 @@ async def _browse_albums(
             media_content_id=str(a["id"]),
             can_play=True,
             can_expand=True,
-            thumbnail=thumb(a.get("cover_path")),
+            thumbnail=thumb(a),
         )
         for a in items
         if a.get("id")
@@ -173,7 +173,7 @@ async def _browse_artists(coordinator: TuneCoordinator) -> BrowseMedia:
 
 async def _browse_artist_albums(
     coordinator: TuneCoordinator,
-    thumb: Callable[[str | None], str | None],
+    thumb: Callable[[dict], str | None],
     artist_id: str,
 ) -> BrowseMedia:
     data = await coordinator.api_get(f"/library/artists/{artist_id}/albums")
@@ -186,7 +186,7 @@ async def _browse_artist_albums(
             media_content_id=str(a["id"]),
             can_play=True,
             can_expand=True,
-            thumbnail=thumb(a.get("cover_path")),
+            thumbnail=thumb(a),
         )
         for a in items
         if a.get("id")
@@ -318,7 +318,7 @@ async def _browse_genres(coordinator: TuneCoordinator) -> BrowseMedia:
 
 async def _browse_genre_albums(
     coordinator: TuneCoordinator,
-    thumb: Callable[[str | None], str | None],
+    thumb: Callable[[dict], str | None],
     genre_name: str,
 ) -> BrowseMedia:
     data = await coordinator.api_get(f"/library/genres/{quote(genre_name, safe='')}/albums")
@@ -331,7 +331,7 @@ async def _browse_genre_albums(
             media_content_id=str(a["id"]),
             can_play=True,
             can_expand=True,
-            thumbnail=thumb(a.get("cover_path")),
+            thumbnail=thumb(a),
         )
         for a in items
         if a.get("id")
@@ -348,7 +348,7 @@ async def _browse_genre_albums(
 
 
 async def _browse_radios(
-    coordinator: TuneCoordinator, thumb: Callable[[str | None], str | None]
+    coordinator: TuneCoordinator, thumb: Callable[[dict], str | None]
 ) -> BrowseMedia:
     data = await coordinator.api_get("/radios")
     items = _items(data, "radios")
@@ -360,7 +360,7 @@ async def _browse_radios(
             media_content_id=str(r["id"]),
             can_play=True,
             can_expand=False,
-            thumbnail=thumb(r.get("logo_url")),
+            thumbnail=r.get("logo_url") or None,
         )
         for r in items
         if r.get("id")

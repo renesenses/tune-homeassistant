@@ -22,12 +22,12 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .browse_media import async_browse_media
 from .const import DOMAIN
-from .coordinator import TuneCoordinator
+from .coordinator import THUMBNAIL_MAX_BYTES, THUMBNAIL_SIZE, TuneCoordinator
 
 _LOGGER = logging.getLogger(__name__)
 
-# Artwork ids served by `GET /library/artwork/{hash}`.
-_ARTWORK_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+# Browse thumbnails are proxied by album id: digits only (no `.`/`..`/`/`).
+_ALBUM_ID = re.compile(r"^[0-9]{1,12}$")
 
 SUPPORTED_FEATURES = (
     MediaPlayerEntityFeature.PAUSE
@@ -137,21 +137,16 @@ class TuneMediaPlayer(CoordinatorEntity[TuneCoordinator], MediaPlayerEntity):
     @property
     def media_image_url(self) -> str | None:
         np = self._track
-        cover = np.get("cover_path") if np else None
-        if not cover:
+        if not np:
             return None
-        if cover.startswith(("http://", "https://")):
-            return cover
-        return f"{self.coordinator.base_url}/library/artwork/{cover}"
+        return self.coordinator.artwork_url(np.get("cover_path"), np.get("album_id"))
 
     async def async_get_media_image(self) -> tuple[bytes | None, str | None]:
         """Fetch the artwork with the Tune credentials (API key if set)."""
         url = self.media_image_url
         if not url:
             return None, None
-        if not url.startswith(self.coordinator.base_url):
-            return await super().async_get_media_image()
-        return await self.coordinator.api_get_bytes(url)
+        return await self.coordinator.fetch_artwork(url)
 
     @property
     def media_duration(self) -> int | None:
@@ -262,20 +257,18 @@ class TuneMediaPlayer(CoordinatorEntity[TuneCoordinator], MediaPlayerEntity):
 
         await self._command("play", body)
 
-    def _browse_thumbnail(self, cover: str | None) -> str | None:
-        """Thumbnail of a browsed item, through Home Assistant's image proxy.
+    def _browse_thumbnail(self, item: dict) -> str | None:
+        """Thumbnail of a browsed album, through Home Assistant's image proxy.
 
         A direct `http://<tune>:8888/...` URL is blocked when the HA frontend
         is served over HTTPS or used remotely; the proxy also carries the
-        Tune API key. External (radio logo) URLs are left as they are.
+        Tune API key. Albums are proxied by id: the server resolves every
+        form of `cover_path` (hash, provider URL, older file path).
         """
-        if not cover:
+        album_id = str(item.get("id", ""))
+        if not item.get("cover_path") or not _ALBUM_ID.match(album_id):
             return None
-        if cover.startswith(("http://", "https://")):
-            return cover
-        if not _ARTWORK_ID.match(cover):
-            return None
-        return self.get_browse_image_url("album", "artwork", media_image_id=cover)
+        return self.get_browse_image_url("album", album_id, media_image_id=album_id)
 
     async def async_get_browse_image(
         self,
@@ -283,11 +276,13 @@ class TuneMediaPlayer(CoordinatorEntity[TuneCoordinator], MediaPlayerEntity):
         media_content_id: str,
         media_image_id: str | None = None,
     ) -> tuple[bytes | None, str | None]:
-        """Serve a library thumbnail (proxied by Home Assistant)."""
-        if not media_image_id or not _ARTWORK_ID.match(media_image_id):
+        """Serve an album thumbnail (proxied by Home Assistant)."""
+        if not media_image_id or not _ALBUM_ID.match(media_image_id):
             return None, None
-        return await self.coordinator.api_get_bytes(
-            f"{self.coordinator.base_url}/library/artwork/{media_image_id}"
+        return await self.coordinator.fetch_artwork(
+            f"{self.coordinator.base_url}/library/albums/{media_image_id}/artwork",
+            size=THUMBNAIL_SIZE,
+            max_bytes=THUMBNAIL_MAX_BYTES,
         )
 
     async def async_browse_media(

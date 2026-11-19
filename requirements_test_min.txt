@@ -1,0 +1,4 @@
+pytest-homeassistant-custom-component==0.13.184  # Home Assistant 2024.11.3, the minimum declared in hacs.json
+josepy<2  # acme of HA 2024.11 uses josepy.ComparableX509, removed in josepy 2
+zeroconf==0.136.0  # ZeroconfServiceInfo lives in homeassistant.components.zeroconf before HA 2025.1
+pycares<4.9  # pycares 4.9 starts a shutdown thread that the HA 2024.11 test harness flags as lingering

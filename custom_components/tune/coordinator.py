@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 from datetime import timedelta
 import logging
+import re
 from typing import Any
 
 import aiohttp
@@ -28,6 +29,12 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+# Artwork: content hash as stored by the server (`is_hex_hash`), size caps.
+_HEX_HASH = re.compile(r"^(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{64})$")
+ARTWORK_MAX_BYTES = 10 * 1024 * 1024
+THUMBNAIL_MAX_BYTES = 5 * 1024 * 1024
+THUMBNAIL_SIZE = 200  # one of the server's buckets (80, 128, 200, 400)
 
 
 async def _json_or_none(resp: aiohttp.ClientResponse) -> Any:
@@ -114,14 +121,62 @@ class TuneCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 break
         return items[:cap]
 
-    async def api_get_bytes(self, url: str) -> tuple[bytes | None, str | None]:
-        """GET raw bytes (artwork) with the Tune credentials."""
-        async with self.session.get(
-            url, headers=self.headers, timeout=self._timeout
-        ) as resp:
-            if resp.status != 200:
-                return None, None
-            return await resp.read(), resp.headers.get("Content-Type")
+    async def fetch_artwork(
+        self, url: str, size: int | None = None, max_bytes: int = ARTWORK_MAX_BYTES
+    ) -> tuple[bytes | None, str | None]:
+        """Artwork bytes, following the server's redirects by hand.
+
+        `/library/albums/{id}/artwork` answers a redirect: to
+        `/api/v1/library/artwork/{hash}` (kept on the Tune server, with the
+        API key and the thumbnail `size`), or to a provider URL (fetched
+        without the Tune credentials). The body is capped at `max_bytes`.
+        """
+        for _ in range(3):
+            internal = url.startswith(self.server_url + "/")
+            params = {"size": str(size)} if size and internal and "/library/artwork/" in url else None
+            async with self.session.get(
+                url,
+                params=params,
+                headers=self.headers if internal else None,
+                timeout=self._timeout,
+                allow_redirects=False,
+            ) as resp:
+                if resp.status in (301, 302, 303, 307, 308):
+                    location = resp.headers.get("Location", "")
+                    if location.startswith("/"):
+                        url = self.server_url + location
+                    elif location.startswith(("http://", "https://")):
+                        url = location
+                    else:
+                        return None, None
+                    continue
+                if resp.status != 200:
+                    return None, None
+                declared = resp.headers.get("Content-Length", "")
+                if declared.isdigit() and int(declared) > max_bytes:
+                    return None, None
+                data = bytearray()
+                async for chunk in resp.content.iter_chunked(65536):
+                    data.extend(chunk)
+                    if len(data) > max_bytes:
+                        return None, None
+                return bytes(data), resp.headers.get("Content-Type")
+        return None, None
+
+    def artwork_url(self, cover: str | None, album_id: int | str | None) -> str | None:
+        """Where the server serves a cover, from what it stores in `cover_path`.
+
+        Mirrors `pochette_de_l_album` (tune-server `routes/library/artwork.rs`):
+        `cover_path` is a provider URL, a 32/64-hex content hash, or (older
+        rows) a file path that only the album route can resolve.
+        """
+        if cover and cover.startswith(("http://", "https://")):
+            return cover
+        if cover and _HEX_HASH.match(cover):
+            return f"{self.base_url}/library/artwork/{cover}"
+        if album_id is not None and str(album_id).isdigit():
+            return f"{self.base_url}/library/albums/{album_id}/artwork"
+        return None
 
     async def _async_update_data(self) -> dict[str, Any]:
         """Fetch zones (with their playback state) from Tune.
