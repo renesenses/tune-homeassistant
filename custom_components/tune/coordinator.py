@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
+from datetime import timedelta
 import logging
 from typing import Any
 
@@ -11,11 +11,33 @@ import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ConfigEntryAuthFailed
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.util import dt as dt_util
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import API_BASE, DOMAIN, POLL_INTERVAL, WS_RECONNECT_MAX, WS_RECONNECT_MIN
+from .const import (
+    API_BASE,
+    CONF_API_KEY,
+    DOMAIN,
+    POLL_INTERVAL,
+    WS_RECONNECT_MAX,
+    WS_RECONNECT_MIN,
+    auth_headers,
+)
 
 _LOGGER = logging.getLogger(__name__)
+
+
+async def _json_or_none(resp: aiohttp.ClientResponse) -> Any:
+    """Body of a command response: some routes answer 204 No Content."""
+    if resp.status == 204 or resp.content_type != "application/json":
+        return None
+    return await resp.json()
+
+
+# High-rate events (VU meters, position ticks): no state refresh for them.
+_IGNORED_EVENTS = ("playback.audio_levels", "playback.position")
 
 
 class TuneCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -26,7 +48,9 @@ class TuneCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.host = entry.data[CONF_HOST]
         self.port = entry.data[CONF_PORT]
         self.base_url = f"http://{self.host}:{self.port}{API_BASE}"
-        self._session: aiohttp.ClientSession | None = None
+        self.headers = auth_headers(entry.data.get(CONF_API_KEY))
+        self.session = async_get_clientsession(hass)
+        self._timeout = aiohttp.ClientTimeout(total=10)
         self._ws: aiohttp.ClientWebSocketResponse | None = None
         self._ws_task: asyncio.Task | None = None
         self._shutdown = False
@@ -34,67 +58,77 @@ class TuneCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         super().__init__(
             hass,
             _LOGGER,
+            config_entry=entry,
             name=DOMAIN,
-            update_interval=asyncio.timedelta(seconds=POLL_INTERVAL) if POLL_INTERVAL else None,
+            update_interval=timedelta(seconds=POLL_INTERVAL) if POLL_INTERVAL else None,
         )
-
-    @property
-    def session(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=10)
-            )
-        return self._session
 
     async def api_get(self, path: str) -> Any:
         """GET request to the Tune API."""
-        async with self.session.get(f"{self.base_url}{path}") as resp:
+        async with self.session.get(
+            f"{self.base_url}{path}", headers=self.headers, timeout=self._timeout
+        ) as resp:
             resp.raise_for_status()
             return await resp.json()
 
-    async def api_post(self, path: str, data: dict | None = None) -> Any:
+    async def api_post(
+        self, path: str, data: dict | None = None, params: dict | None = None
+    ) -> Any:
         """POST request to the Tune API."""
         async with self.session.post(
-            f"{self.base_url}{path}", json=data or {}
+            f"{self.base_url}{path}",
+            json=data or {},
+            params=params,
+            headers=self.headers,
+            timeout=self._timeout,
         ) as resp:
             resp.raise_for_status()
-            return await resp.json()
+            return await _json_or_none(resp)
 
-    async def api_patch(self, path: str, data: dict) -> Any:
-        """PATCH request to the Tune API."""
-        async with self.session.patch(
-            f"{self.base_url}{path}", json=data
+    async def api_put(self, path: str, data: dict) -> Any:
+        """PUT request to the Tune API."""
+        async with self.session.put(
+            f"{self.base_url}{path}", json=data, headers=self.headers, timeout=self._timeout
         ) as resp:
             resp.raise_for_status()
-            return await resp.json()
+            return await _json_or_none(resp)
+
+    async def api_get_bytes(self, url: str) -> tuple[bytes | None, str | None]:
+        """GET raw bytes (artwork) with the Tune credentials."""
+        async with self.session.get(
+            url, headers=self.headers, timeout=self._timeout
+        ) as resp:
+            if resp.status != 200:
+                return None, None
+            return await resp.read(), resp.headers.get("Content-Type")
 
     async def _async_update_data(self) -> dict[str, Any]:
-        """Fetch zones + playback state from Tune."""
+        """Fetch zones (with their playback state) from Tune.
+
+        `GET /zones` carries each zone's `state`, `current_track`,
+        `position_ms`, `volume`, `muted`, `shuffle` and `repeat`.
+        """
         try:
             zones = await self.api_get("/zones")
-            now_listening = await self.api_get("/playback/now-listening")
-
-            zone_states = {}
-            zone_list = zones if isinstance(zones, list) else zones.get("zones", [])
-            for z in zone_list:
-                zid = z.get("id")
-                if zid is None:
-                    continue
-                zone_states[zid] = z
-
-            for nl in (now_listening if isinstance(now_listening, list) else []):
-                zid = nl.get("zone_id")
-                if zid and zid in zone_states:
-                    zone_states[zid].update(nl)
-
-            return {"zones": zone_states}
-        except aiohttp.ClientError as err:
+        except aiohttp.ClientResponseError as err:
+            if err.status in (401, 403):
+                raise ConfigEntryAuthFailed(
+                    "Tune server requires an API key"
+                ) from err
+            raise UpdateFailed(f"Tune server error: {err}") from err
+        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
             raise UpdateFailed(f"Cannot reach Tune server: {err}") from err
+
+        zone_list = zones if isinstance(zones, list) else zones.get("zones", [])
+        zone_states = {z["id"]: z for z in zone_list if z.get("id") is not None}
+        return {"zones": zone_states, "updated_at": dt_util.utcnow()}
 
     async def async_config_entry_first_refresh(self) -> None:
         """First refresh + start WebSocket listener."""
         await super().async_config_entry_first_refresh()
-        self._ws_task = asyncio.create_task(self._ws_loop())
+        self._ws_task = self.hass.async_create_background_task(
+            self._ws_loop(), name="tune_websocket"
+        )
 
     async def _ws_loop(self) -> None:
         """WebSocket listener with auto-reconnect."""
@@ -102,7 +136,9 @@ class TuneCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         while not self._shutdown:
             try:
                 ws_url = f"ws://{self.host}:{self.port}/ws"
-                self._ws = await self.session.ws_connect(ws_url)
+                self._ws = await self.session.ws_connect(
+                    ws_url, headers=self.headers, heartbeat=30
+                )
                 _LOGGER.info("Tune WebSocket connected")
                 delay = WS_RECONNECT_MIN
 
@@ -117,7 +153,9 @@ class TuneCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         event_type = data.get("type", "")
                         if event_type == "ping":
                             await self._ws.send_str("pong")
-                        elif event_type.startswith("playback.") or event_type.startswith("zone."):
+                        elif event_type in _IGNORED_EVENTS:
+                            continue
+                        elif event_type.startswith(("playback.", "zone.")):
                             await self.async_request_refresh()
                     elif msg.type in (
                         aiohttp.WSMsgType.CLOSED,
@@ -125,7 +163,9 @@ class TuneCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     ):
                         break
 
-            except (aiohttp.ClientError, asyncio.CancelledError) as err:
+            except asyncio.CancelledError:
+                return
+            except (aiohttp.ClientError, asyncio.TimeoutError) as err:
                 if self._shutdown:
                     return
                 _LOGGER.debug("Tune WebSocket disconnected: %s", err)
@@ -144,6 +184,4 @@ class TuneCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if self._ws_task:
             self._ws_task.cancel()
         if self._ws and not self._ws.closed:
-            asyncio.create_task(self._ws.close())
-        if self._session and not self._session.closed:
-            asyncio.create_task(self._session.close())
+            self.hass.async_create_task(self._ws.close())

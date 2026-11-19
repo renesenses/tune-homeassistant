@@ -1,17 +1,39 @@
 {
   "config": {
+    "flow_title": "{name}",
     "step": {
       "user": {
         "title": "Connect to Tune Music Server",
         "data": {
           "host": "Host",
-          "port": "Port"
+          "port": "Port",
+          "api_key": "API key (only if authentication is enabled)"
+        }
+      },
+      "zeroconf_confirm": {
+        "title": "Tune server found",
+        "description": "Add the Tune server at {host}:{port}?",
+        "data": {
+          "api_key": "API key (only if authentication is enabled)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Tune server API key",
+        "description": "Authentication is enabled on this Tune server. Enter an API key.",
+        "data": {
+          "api_key": "API key"
         }
       }
     },
     "error": {
       "cannot_connect": "Cannot connect to Tune server",
+      "invalid_auth": "The Tune server refused the API key",
       "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "This Tune server is already configured",
+      "cannot_connect": "Cannot connect to Tune server",
+      "reauth_successful": "API key updated"
     }
   }
 }
