@@ -9,10 +9,21 @@ from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 from ipaddress import ip_address
+import asyncio
+import json
+from pathlib import Path
+from unittest.mock import AsyncMock, patch
+
+import aiohttp
+from homeassistant.exceptions import HomeAssistantError
 import pytest
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from custom_components.tune.const import CONF_API_KEY, DOMAIN
+from custom_components.tune.const import CONF_API_KEY, DOMAIN, url_host
+from custom_components.tune.coordinator import TuneCoordinator
+
+# Captured before the `no_websocket` fixture replaces it.
+_REAL_WS_LOOP = TuneCoordinator._ws_loop
 
 BASE = "http://192.168.1.50:8888/api/v1"
 
@@ -46,11 +57,11 @@ def _mock_server(aioclient_mock, zones_status=200):
     aioclient_mock.put(f"{BASE}/zones/1/muted", status=204)
     aioclient_mock.post(f"{BASE}/radios/7/play/1", json={})
     aioclient_mock.get(
-        f"{BASE}/library/albums?limit=200",
+        f"{BASE}/library/albums",
         json={"items": [{"id": 1, "title": "Album", "cover_path": "abc123"}], "total": 1},
     )
     aioclient_mock.get(
-        f"{BASE}/library/artists?limit=200",
+        f"{BASE}/library/artists",
         json={"items": [{"id": 1, "name": "Artiste"}], "total": 1},
     )
 
@@ -206,6 +217,74 @@ async def test_browse_library(hass, aioclient_mock, no_websocket):
     )
     albums = await entity.async_browse_media("album", "albums")
     assert [c.title for c in albums.children] == ["Album"]
-    assert albums.children[0].thumbnail == f"{BASE}/library/artwork/abc123"
+    thumb = albums.children[0].thumbnail
+    # Through Home Assistant's image proxy, not a direct http://<tune> URL.
+    assert thumb.startswith("/api/media_player_proxy/"), thumb
+    assert "media_image_id=abc123" in thumb
+    aioclient_mock.get(f"{BASE}/library/artwork/abc123", content=b"img", headers={"Content-Type": "image/jpeg"})
+    assert await entity.async_get_browse_image("album", "artwork", "abc123") == (b"img", "image/jpeg")
+    assert await entity.async_get_browse_image("album", "artwork", "../../system/config") == (None, None)
     artists = await entity.async_browse_media("artist", "artists")
     assert [c.title for c in artists.children] == ["Artiste"]
+
+
+def test_manifest():
+    """The integration must be offered in "Add integration" (config_flow)."""
+    manifest = json.loads(
+        (Path(__file__).parents[1] / "custom_components/tune/manifest.json").read_text()
+    )
+    assert manifest["config_flow"] is True
+    assert manifest["integration_type"] == "hub"
+    assert manifest["zeroconf"] == [{"type": "_tune-server._tcp.local."}]
+    assert manifest["version"]
+
+
+async def test_zone_removed_is_unavailable(hass, aioclient_mock, no_websocket):
+    entry = await _setup(hass, aioclient_mock)
+    eid = "media_player.tune_server_192_168_1_50_salon"
+    aioclient_mock.clear_requests()
+    aioclient_mock.get(f"{BASE}/zones", json=[])
+    await hass.data[DOMAIN][entry.entry_id].async_refresh()
+    await hass.async_block_till_done()
+    assert hass.states.get(eid).state == "unavailable"
+
+
+async def test_play_media_rejects_urls(hass, aioclient_mock, no_websocket):
+    await _setup(hass, aioclient_mock)
+    eid = "media_player.tune_server_192_168_1_50_salon"
+    for media_id in ("media-source://tts/google?message=hi", "http://example.com/a.mp3", "abc"):
+        with pytest.raises(HomeAssistantError):
+            await hass.services.async_call(
+                MP_DOMAIN, "play_media",
+                {"entity_id": eid, "media_content_type": "music", "media_content_id": media_id},
+                blocking=True,
+            )
+
+
+async def test_genre_name_is_fully_quoted(hass, aioclient_mock, no_websocket):
+    await _setup(hass, aioclient_mock)
+    entity = hass.data["entity_components"][MP_DOMAIN].get_entity(
+        "media_player.tune_server_192_168_1_50_salon"
+    )
+    aioclient_mock.get(f"{BASE}/library/genres/Rock%2FPop/albums", json=[{"id": 2, "title": "X"}])
+    result = await entity.async_browse_media("genre", "Rock/Pop")
+    assert [c.title for c in result.children] == ["X"]
+
+
+def test_ipv6_host():
+    assert url_host("fe80::1") == "[fe80::1]"
+    assert url_host("192.168.1.50") == "192.168.1.50"
+    assert url_host("[fe80::1]") == "[fe80::1]"
+
+
+async def test_websocket_401_starts_reauth(hass, aioclient_mock, no_websocket):
+    entry = await _setup(hass, aioclient_mock)
+    coordinator = hass.data[DOMAIN][entry.entry_id]
+    err = aiohttp.WSServerHandshakeError(
+        request_info=None, history=(), status=401, message="authentication required"
+    )
+    with patch.object(coordinator.session, "ws_connect", AsyncMock(side_effect=err)):
+        await asyncio.wait_for(_REAL_WS_LOOP(coordinator), 5)
+    await hass.async_block_till_done()
+    flows = hass.config_entries.flow.async_progress()
+    assert any(f["context"]["source"] == config_entries.SOURCE_REAUTH for f in flows)

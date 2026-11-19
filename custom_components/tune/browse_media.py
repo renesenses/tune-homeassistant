@@ -1,6 +1,9 @@
 """Media browser support for Tune Music Server."""
 from __future__ import annotations
 
+from collections.abc import Callable
+from urllib.parse import quote
+
 from homeassistant.components.media_player import BrowseMedia, MediaClass, MediaType
 
 from .coordinator import TuneCoordinator
@@ -10,7 +13,7 @@ LIBRARY_ROOT = "tune_library"
 
 async def async_browse_media(
     coordinator: TuneCoordinator,
-    zone_id: int,
+    thumb: Callable[[str | None], str | None],
     media_content_type: MediaType | str | None = None,
     media_content_id: str | None = None,
 ) -> BrowseMedia:
@@ -19,7 +22,7 @@ async def async_browse_media(
         return _root_menu(coordinator)
 
     if media_content_id == "albums":
-        return await _browse_albums(coordinator)
+        return await _browse_albums(coordinator, thumb)
     if media_content_id == "artists":
         return await _browse_artists(coordinator)
     if media_content_id == "playlists":
@@ -27,16 +30,16 @@ async def async_browse_media(
     if media_content_id == "genres":
         return await _browse_genres(coordinator)
     if media_content_id == "radios":
-        return await _browse_radios(coordinator)
+        return await _browse_radios(coordinator, thumb)
 
     if media_content_type == MediaType.ARTIST:
-        return await _browse_artist_albums(coordinator, media_content_id)
+        return await _browse_artist_albums(coordinator, thumb, media_content_id)
     if media_content_type == MediaType.ALBUM:
         return await _browse_album_tracks(coordinator, media_content_id)
     if media_content_type == MediaType.PLAYLIST:
         return await _browse_playlist_tracks(coordinator, media_content_id)
     if media_content_type == "genre":
-        return await _browse_genre_albums(coordinator, media_content_id)
+        return await _browse_genre_albums(coordinator, thumb, media_content_id)
 
     return _root_menu(coordinator)
 
@@ -111,17 +114,13 @@ def _items(data, key: str) -> list:
     return []
 
 
-def _artwork_url(coordinator: TuneCoordinator, cover: str | None) -> str | None:
-    if not cover:
-        return None
-    if cover.startswith(("http://", "https://")):
-        return cover
-    return f"{coordinator.base_url}/library/artwork/{cover}"
 
 
-async def _browse_albums(coordinator: TuneCoordinator) -> BrowseMedia:
-    data = await coordinator.api_get("/library/albums?limit=200")
-    items = _items(data, "albums")
+
+async def _browse_albums(
+    coordinator: TuneCoordinator, thumb: Callable[[str | None], str | None]
+) -> BrowseMedia:
+    items = await coordinator.api_get_all("/library/albums", "albums")
     children = [
         BrowseMedia(
             title=a.get("title", "?"),
@@ -130,7 +129,7 @@ async def _browse_albums(coordinator: TuneCoordinator) -> BrowseMedia:
             media_content_id=str(a["id"]),
             can_play=True,
             can_expand=True,
-            thumbnail=_artwork_url(coordinator, a.get("cover_path")),
+            thumbnail=thumb(a.get("cover_path")),
         )
         for a in items
         if a.get("id")
@@ -147,8 +146,7 @@ async def _browse_albums(coordinator: TuneCoordinator) -> BrowseMedia:
 
 
 async def _browse_artists(coordinator: TuneCoordinator) -> BrowseMedia:
-    data = await coordinator.api_get("/library/artists?limit=200")
-    items = _items(data, "artists")
+    items = await coordinator.api_get_all("/library/artists", "artists")
     children = [
         BrowseMedia(
             title=a.get("name", "?"),
@@ -174,7 +172,9 @@ async def _browse_artists(coordinator: TuneCoordinator) -> BrowseMedia:
 
 
 async def _browse_artist_albums(
-    coordinator: TuneCoordinator, artist_id: str
+    coordinator: TuneCoordinator,
+    thumb: Callable[[str | None], str | None],
+    artist_id: str,
 ) -> BrowseMedia:
     data = await coordinator.api_get(f"/library/artists/{artist_id}/albums")
     items = _items(data, "albums")
@@ -186,7 +186,7 @@ async def _browse_artist_albums(
             media_content_id=str(a["id"]),
             can_play=True,
             can_expand=True,
-            thumbnail=_artwork_url(coordinator, a.get("cover_path")),
+            thumbnail=thumb(a.get("cover_path")),
         )
         for a in items
         if a.get("id")
@@ -236,8 +236,7 @@ async def _browse_album_tracks(
 
 
 async def _browse_playlists(coordinator: TuneCoordinator) -> BrowseMedia:
-    data = await coordinator.api_get("/playlists")
-    items = _items(data, "playlists")
+    items = await coordinator.api_get_all("/playlists", "playlists")
     children = [
         BrowseMedia(
             title=p.get("name", "?"),
@@ -318,10 +317,11 @@ async def _browse_genres(coordinator: TuneCoordinator) -> BrowseMedia:
 
 
 async def _browse_genre_albums(
-    coordinator: TuneCoordinator, genre_name: str
+    coordinator: TuneCoordinator,
+    thumb: Callable[[str | None], str | None],
+    genre_name: str,
 ) -> BrowseMedia:
-    from urllib.parse import quote
-    data = await coordinator.api_get(f"/library/genres/{quote(genre_name)}/albums")
+    data = await coordinator.api_get(f"/library/genres/{quote(genre_name, safe='')}/albums")
     items = _items(data, "albums")
     children = [
         BrowseMedia(
@@ -331,7 +331,7 @@ async def _browse_genre_albums(
             media_content_id=str(a["id"]),
             can_play=True,
             can_expand=True,
-            thumbnail=_artwork_url(coordinator, a.get("cover_path")),
+            thumbnail=thumb(a.get("cover_path")),
         )
         for a in items
         if a.get("id")
@@ -347,7 +347,9 @@ async def _browse_genre_albums(
     )
 
 
-async def _browse_radios(coordinator: TuneCoordinator) -> BrowseMedia:
+async def _browse_radios(
+    coordinator: TuneCoordinator, thumb: Callable[[str | None], str | None]
+) -> BrowseMedia:
     data = await coordinator.api_get("/radios")
     items = _items(data, "radios")
     children = [
@@ -358,7 +360,7 @@ async def _browse_radios(coordinator: TuneCoordinator) -> BrowseMedia:
             media_content_id=str(r["id"]),
             can_play=True,
             can_expand=False,
-            thumbnail=r.get("logo_url"),
+            thumbnail=thumb(r.get("logo_url")),
         )
         for r in items
         if r.get("id")

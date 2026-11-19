@@ -23,3 +23,11 @@ WS_RECONNECT_MAX = 30
 def auth_headers(api_key: str | None) -> dict[str, str]:
     """HTTP headers carrying the Tune API key, if any."""
     return {"Authorization": f"ApiKey {api_key}"} if api_key else {}
+
+
+def url_host(host: str) -> str:
+    """Host as written in a URL: IPv6 literals go between brackets."""
+    host = host.strip()
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host

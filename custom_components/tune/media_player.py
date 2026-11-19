@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from homeassistant.components.media_player import (
@@ -15,6 +16,7 @@ from homeassistant.components.media_player import (
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -23,6 +25,9 @@ from .const import DOMAIN
 from .coordinator import TuneCoordinator
 
 _LOGGER = logging.getLogger(__name__)
+
+# Artwork ids served by `GET /library/artwork/{hash}`.
+_ARTWORK_ID = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 SUPPORTED_FEATURES = (
     MediaPlayerEntityFeature.PAUSE
@@ -87,6 +92,13 @@ class TuneMediaPlayer(CoordinatorEntity[TuneCoordinator], MediaPlayerEntity):
     def _zone(self) -> dict:
         """Get current zone data from coordinator."""
         return self.coordinator.data.get("zones", {}).get(self._zone_id, {})
+
+    @property
+    def available(self) -> bool:
+        """Unavailable when the server is unreachable or the zone was deleted."""
+        return super().available and self._zone_id in self.coordinator.data.get(
+            "zones", {}
+        )
 
     @property
     def state(self) -> MediaPlayerState:
@@ -221,22 +233,62 @@ class TuneMediaPlayer(CoordinatorEntity[TuneCoordinator], MediaPlayerEntity):
     async def async_play_media(
         self, media_type: MediaType | str, media_id: str, **kwargs: Any
     ) -> None:
-        """Play a specific media item."""
+        """Play an item of the Tune library (album, playlist, track, radio)."""
+        if str(media_id).startswith("media-source://") or "://" in str(media_id):
+            # Tune plays its own library and radio stations; it has no route
+            # to play an arbitrary URL (TTS, media sources, camera streams...).
+            raise HomeAssistantError(
+                "Tune can only play items of its own library or radio stations "
+                f"(not {media_id})"
+            )
+        try:
+            item_id = int(media_id)
+        except (TypeError, ValueError) as err:
+            raise HomeAssistantError(f"Unknown Tune media id: {media_id}") from err
+
         if media_type == MediaType.CHANNEL:
             # Radio station: dedicated route.
-            await self.coordinator.api_post(f"/radios/{int(media_id)}/play/{self._zone_id}")
+            await self.coordinator.api_post(f"/radios/{item_id}/play/{self._zone_id}")
             await self.coordinator.async_request_refresh()
             return
 
         body: dict[str, Any] = {}
         if media_type == MediaType.ALBUM:
-            body["album_id"] = int(media_id)
+            body["album_id"] = item_id
         elif media_type == MediaType.PLAYLIST:
-            body["playlist_id"] = int(media_id)
+            body["playlist_id"] = item_id
         else:
-            body["track_id"] = int(media_id)
+            body["track_id"] = item_id
 
         await self._command("play", body)
+
+    def _browse_thumbnail(self, cover: str | None) -> str | None:
+        """Thumbnail of a browsed item, through Home Assistant's image proxy.
+
+        A direct `http://<tune>:8888/...` URL is blocked when the HA frontend
+        is served over HTTPS or used remotely; the proxy also carries the
+        Tune API key. External (radio logo) URLs are left as they are.
+        """
+        if not cover:
+            return None
+        if cover.startswith(("http://", "https://")):
+            return cover
+        if not _ARTWORK_ID.match(cover):
+            return None
+        return self.get_browse_image_url("album", "artwork", media_image_id=cover)
+
+    async def async_get_browse_image(
+        self,
+        media_content_type: MediaType | str,
+        media_content_id: str,
+        media_image_id: str | None = None,
+    ) -> tuple[bytes | None, str | None]:
+        """Serve a library thumbnail (proxied by Home Assistant)."""
+        if not media_image_id or not _ARTWORK_ID.match(media_image_id):
+            return None, None
+        return await self.coordinator.api_get_bytes(
+            f"{self.coordinator.base_url}/library/artwork/{media_image_id}"
+        )
 
     async def async_browse_media(
         self,
@@ -245,5 +297,8 @@ class TuneMediaPlayer(CoordinatorEntity[TuneCoordinator], MediaPlayerEntity):
     ) -> BrowseMedia:
         """Implement the media browser."""
         return await async_browse_media(
-            self.coordinator, self._zone_id, media_content_type, media_content_id
+            self.coordinator,
+            self._browse_thumbnail,
+            media_content_type,
+            media_content_id,
         )

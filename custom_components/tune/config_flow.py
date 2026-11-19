@@ -17,7 +17,15 @@ try:  # HA >= 2025.1
 except ImportError:  # pragma: no cover - older HA
     from homeassistant.components.zeroconf import ZeroconfServiceInfo
 
-from .const import API_BASE, CONF_API_KEY, DEFAULT_HOST, DEFAULT_PORT, DOMAIN, auth_headers
+from .const import (
+    API_BASE,
+    CONF_API_KEY,
+    DEFAULT_HOST,
+    DEFAULT_PORT,
+    DOMAIN,
+    auth_headers,
+    url_host,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -65,6 +73,9 @@ class TuneConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = "invalid_auth"
             except (aiohttp.ClientError, TimeoutError):
                 errors["base"] = "cannot_connect"
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Unexpected error")
+                errors["base"] = "unknown"
             else:
                 return self.async_create_entry(
                     title=info["name"],
@@ -138,6 +149,9 @@ class TuneConfigFlow(ConfigFlow, domain=DOMAIN):
                 errors["base"] = "invalid_auth"
             except (aiohttp.ClientError, TimeoutError):
                 errors["base"] = "cannot_connect"
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("Unexpected error")
+                errors["base"] = "unknown"
             else:
                 return self.async_update_reload_and_abort(
                     self._get_reauth_entry(),
@@ -163,7 +177,7 @@ class TuneConfigFlow(ConfigFlow, domain=DOMAIN):
         credentials are checked against `/zones`.
         """
         session = async_get_clientsession(self.hass)
-        base = f"http://{host}:{port}{API_BASE}"
+        base = f"http://{url_host(host)}:{port}{API_BASE}"
         timeout = aiohttp.ClientTimeout(total=5)
         async with session.get(f"{base}/system/version", timeout=timeout) as resp:
             resp.raise_for_status()

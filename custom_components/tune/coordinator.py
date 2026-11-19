@@ -24,6 +24,7 @@ from .const import (
     WS_RECONNECT_MAX,
     WS_RECONNECT_MIN,
     auth_headers,
+    url_host,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -47,7 +48,9 @@ class TuneCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Initialize."""
         self.host = entry.data[CONF_HOST]
         self.port = entry.data[CONF_PORT]
-        self.base_url = f"http://{self.host}:{self.port}{API_BASE}"
+        self.server_url = f"http://{url_host(self.host)}:{self.port}"
+        self.base_url = f"{self.server_url}{API_BASE}"
+        self._entry = entry
         self.headers = auth_headers(entry.data.get(CONF_API_KEY))
         self.session = async_get_clientsession(hass)
         self._timeout = aiohttp.ClientTimeout(total=10)
@@ -93,6 +96,24 @@ class TuneCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             resp.raise_for_status()
             return await _json_or_none(resp)
 
+    async def api_get_all(self, path: str, key: str, page: int = 500, cap: int = 5000) -> list:
+        """Every item of a paginated list route (`limit` / `offset`), up to `cap`."""
+        items: list = []
+        sep = "&" if "?" in path else "?"
+        while len(items) < cap:
+            data = await self.api_get(f"{path}{sep}limit={page}&offset={len(items)}")
+            if isinstance(data, list):
+                chunk, total = data, None
+            elif isinstance(data, dict):
+                chunk = data.get("items") or data.get(key) or []
+                total = data.get("total")
+            else:
+                break
+            items.extend(chunk)
+            if len(chunk) < page or (total is not None and len(items) >= total):
+                break
+        return items[:cap]
+
     async def api_get_bytes(self, url: str) -> tuple[bytes | None, str | None]:
         """GET raw bytes (artwork) with the Tune credentials."""
         async with self.session.get(
@@ -126,8 +147,8 @@ class TuneCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def async_config_entry_first_refresh(self) -> None:
         """First refresh + start WebSocket listener."""
         await super().async_config_entry_first_refresh()
-        self._ws_task = self.hass.async_create_background_task(
-            self._ws_loop(), name="tune_websocket"
+        self._ws_task = self._entry.async_create_background_task(
+            self.hass, self._ws_loop(), name="tune_websocket"
         )
 
     async def _ws_loop(self) -> None:
@@ -135,7 +156,7 @@ class TuneCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         delay = WS_RECONNECT_MIN
         while not self._shutdown:
             try:
-                ws_url = f"ws://{self.host}:{self.port}/ws"
+                ws_url = f"ws://{url_host(self.host)}:{self.port}/ws"
                 self._ws = await self.session.ws_connect(
                     ws_url, headers=self.headers, heartbeat=30
                 )
@@ -165,6 +186,14 @@ class TuneCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
             except asyncio.CancelledError:
                 return
+            except aiohttp.WSServerHandshakeError as err:
+                if err.status in (401, 403):
+                    # Authentication enabled (or key revoked) on the server:
+                    # ask for a key instead of retrying forever.
+                    _LOGGER.warning("Tune WebSocket refused (HTTP %s): reauthentication needed", err.status)
+                    self._entry.async_start_reauth(self.hass)
+                    return
+                _LOGGER.debug("Tune WebSocket handshake failed: %s", err)
             except (aiohttp.ClientError, asyncio.TimeoutError) as err:
                 if self._shutdown:
                     return
